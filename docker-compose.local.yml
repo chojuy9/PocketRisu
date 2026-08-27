@@ -1,0 +1,26 @@
+# Local source build of this fork — use this instead of docker-compose.yml when
+# you want to run the patched image (chunked writes for proxy/tunnel 100MB body
+# caps) without publishing to a container registry.
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# The save volume is declared external so it reuses the EXISTING data volume
+# created by the stock compose file — your database and assets are untouched.
+name: risuai-nodeonly
+
+services:
+  risuai:
+    container_name: risuai-nodeonly
+    build:
+      context: .
+    image: pocketrisu-cf-chunked:local
+    restart: always
+    ports:
+      - 6001:6001
+    volumes:
+      - risuai-save:/app/save
+
+volumes:
+  risuai-save:
+    name: risuai-nodeonly_risuai-save
+    external: true
