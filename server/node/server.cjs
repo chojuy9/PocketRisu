@@ -4085,13 +4085,74 @@ app.delete('/api/logs', async (req, res, next) => {
 const requestLogs = createRequestLogs({ saveDir: savePath });
 requestLogs.registerRoutes(app, { auth: checkAuth, activeSession: checkActiveSession });
 
+// ─── Chunked write support (reverse-proxy / tunnel body-size workaround) ──────
+// Cloudflare and most tunnels/proxies cap a single request body (Cloudflare's
+// free/pro/business plans at 100 MB). A full database.bin or a large asset can
+// exceed that, so the client may split one logical value into ordered chunks
+// that share an x-upload-id. We accumulate them in memory and hand the
+// reassembled buffer to the normal write path once every chunk has arrived.
+const chunkedUploads = new Map(); // uploadId -> { key, parts, count, bytes, ts }
+const CHUNK_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024; // mirror express.raw('2gb')
+const CHUNK_UPLOAD_TTL_MS = 10 * 60 * 1000;
+
+function sweepStaleChunkUploads() {
+    const now = Date.now();
+    for (const [id, up] of chunkedUploads) {
+        if (now - up.ts > CHUNK_UPLOAD_TTL_MS) chunkedUploads.delete(id);
+    }
+}
+
+// Buffer one incoming chunk. Returns the fully reassembled Buffer once the
+// final chunk lands; otherwise returns null after sending an interim ("pending")
+// or error response — callers must stop when they get null.
+function ingestWriteChunk(req, res, filePath, uploadId) {
+    const index = Number(req.headers['x-chunk-index']);
+    const count = Number(req.headers['x-chunk-count']);
+    const chunk = req.body;
+    if (!Number.isInteger(index) || !Number.isInteger(count) ||
+        index < 0 || count < 1 || index >= count) {
+        res.status(400).send({ error: 'Invalid chunk headers' });
+        return null;
+    }
+    if (!Buffer.isBuffer(chunk) || chunk.length === 0) {
+        res.status(400).send({ error: 'Empty chunk' });
+        return null;
+    }
+    sweepStaleChunkUploads();
+    let up = chunkedUploads.get(uploadId);
+    if (!up) {
+        up = { key: filePath, parts: new Array(count).fill(null), count, bytes: 0, ts: Date.now() };
+        chunkedUploads.set(uploadId, up);
+    }
+    // Every chunk of one upload must agree on the target key and total count.
+    if (up.key !== filePath || up.count !== count) {
+        chunkedUploads.delete(uploadId);
+        res.status(400).send({ error: 'Chunk metadata mismatch' });
+        return null;
+    }
+    if (up.parts[index] == null) up.bytes += chunk.length;
+    if (up.bytes > CHUNK_UPLOAD_MAX_BYTES) {
+        chunkedUploads.delete(uploadId);
+        res.status(413).send({ error: 'Upload exceeds max allowed size' });
+        return null;
+    }
+    up.parts[index] = chunk;
+    up.ts = Date.now();
+    if (!up.parts.every(p => p != null)) {
+        res.send({ success: true, received: index, pending: true });
+        return null;
+    }
+    chunkedUploads.delete(uploadId);
+    return Buffer.concat(up.parts);
+}
+
 app.post('/api/write', async (req, res, next) => {
     if(!await checkAuth(req, res)){
         return;
     }
     if (!checkActiveSession(req, res)) return;
     const filePath = normalizeFilePathHeader(req.headers['file-path']);
-    const fileContent = req.body;
+    let fileContent = req.body;
     if (!filePath || !fileContent) {
         res.status(400).send({ error:'File path required' });
         return;
@@ -4099,6 +4160,14 @@ app.post('/api/write', async (req, res, next) => {
     if(!isHex(filePath)){
         res.status(400).send({ error:'Invaild Path' });
         return;
+    }
+    // Chunked upload: reassemble ordered parts sharing an x-upload-id, and only
+    // fall through to the real write once the final chunk completes the value.
+    const chunkUploadId = req.headers['x-upload-id'];
+    if (typeof chunkUploadId === 'string' && chunkUploadId) {
+        const assembled = ingestWriteChunk(req, res, filePath, chunkUploadId);
+        if (!assembled) return; // pending / invalid / error — response already sent
+        fileContent = assembled;
     }
     try {
         await queueStorageOperation(async () => {

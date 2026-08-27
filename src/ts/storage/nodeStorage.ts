@@ -191,6 +191,14 @@ export type AssetManifestOperation =
 export class NodeStorage{
     private static readonly BULK_WRITE_CLIENT_BATCH = 20
 
+    // Reverse proxies / tunnels cap a single request body — Cloudflare's
+    // free/pro/business plans at 100 MB. Values larger than the threshold are
+    // uploaded as ordered sub-limit chunks the server reassembles, so a big
+    // database.bin or asset survives the hop. 90 MB leaves headroom under the
+    // 100 MB ceiling for headers and any 1000-vs-1024 unit ambiguity.
+    private static readonly WRITE_CHUNK_THRESHOLD = 90 * 1024 * 1024
+    private static readonly WRITE_CHUNK_SIZE = 90 * 1024 * 1024
+
     // Cross-device single-writer lock identity. Persisted in sessionStorage so
     // a reload or an OS tab restore of the SAME tab keeps the same identity —
     // a phone tab resurrected in the background must not look like a new
@@ -494,6 +502,11 @@ export class NodeStorage{
     }
 
     async setItem(key:string, value:Uint8Array, etag?:string) {
+        // Oversized values can't cross a proxy/tunnel that caps request bodies
+        // (Cloudflare = 100 MB), so split them; small writes keep the fast path.
+        if (value.length > NodeStorage.WRITE_CHUNK_THRESHOLD) {
+            return this.setItemChunked(key, value, etag)
+        }
         const headers: Record<string, string> = {
             'content-type': 'application/octet-stream',
             'file-path': Buffer.from(key, 'utf-8').toString('hex')
@@ -531,6 +544,53 @@ export class NodeStorage{
         const diagnostics = this._lastDbWriteDiagnostics
         this._lastDbWriteDiagnostics = null
         return diagnostics
+    }
+
+    // Stream a large value to /api/write as ordered ≤WRITE_CHUNK_SIZE parts
+    // sharing one x-upload-id. The server buffers the parts and only persists
+    // on the final chunk, whose response carries the real write result (etag /
+    // 409 conflict). Semantics match the single-shot path above.
+    private async setItemChunked(key:string, value:Uint8Array, etag?:string) {
+        const hexPath = Buffer.from(key, 'utf-8').toString('hex')
+        const size = NodeStorage.WRITE_CHUNK_SIZE
+        const count = Math.ceil(value.length / size)
+        const uploadId = `${hexPath}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        let finalRes: Response | null = null
+        for (let i = 0; i < count; i++) {
+            const start = i * size
+            const part = value.subarray(start, Math.min(start + size, value.length))
+            const headers: Record<string, string> = {
+                'content-type': 'application/octet-stream',
+                'file-path': hexPath,
+                'x-upload-id': uploadId,
+                'x-chunk-index': String(i),
+                'x-chunk-count': String(count),
+            }
+            if (etag) {
+                headers['x-if-match'] = etag
+            }
+            const da = await this.authFetch('/api/write', {
+                method: "POST",
+                body: part as any,
+                headers
+            })
+            if(da.status === 409){
+                const data = await da.json()
+                throw new ConflictError(data.error, data.currentEtag)
+            }
+            if(da.status < 200 || da.status >= 300){
+                throw "setItem Error"
+            }
+            finalRes = da
+        }
+        const data = await finalRes!.json()
+        if(data.error){
+            throw data.error
+        }
+        const nextEtag = data.etag as string | undefined
+        if (key === 'database/database.bin' && nextEtag) {
+            this._lastDbEtag = nextEtag
+        }
     }
     async getItem(key:string):Promise<Buffer> {
         const headers: Record<string, string> = {
@@ -998,7 +1058,22 @@ export class NodeStorage{
             }
 
             xhr.onprogress = drainNdjson
-            xhr.onerror = () => reject(new Error('backup import request failed'))
+            xhr.onerror = () => {
+                // The server reports failures as an NDJSON 'error' line and then
+                // ends the response. While a large upload is still in flight that
+                // closes the socket, so the request lands here rather than in
+                // onload. Drain whatever already arrived, otherwise the real
+                // reason is discarded and only the generic message survives.
+                drainNdjson()
+                if (serverErrorMsg) {
+                    reject(new Error(serverErrorMsg))
+                    return
+                }
+                reject(new Error(
+                    'backup import request failed: the connection closed during upload. ' +
+                    'If the server is reached through a reverse proxy or tunnel, check its maximum request body size.'
+                ))
+            }
             xhr.onload = () => {
                 if (xhr.status < 200 || xhr.status >= 300) {
                     let msg = `backup import error: ${xhr.status}`
