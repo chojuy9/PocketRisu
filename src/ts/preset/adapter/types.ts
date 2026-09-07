@@ -94,6 +94,16 @@ export interface AdapterImagePart {
     mime?: string
 }
 
+// Audio attachment on a user message. Like AdapterImagePart, `base64` is the RAW
+// base64 payload (no `data:` prefix) and `mime` the media type, parsed out of the
+// classic `data:` URL by the message builder. Only the google-gemini adapter
+// currently emits these (Gemini accepts inline audio); other adapters ignore them.
+export interface AdapterAudioPart {
+    kind: 'audio'
+    base64: string
+    mime?: string
+}
+
 export interface AdapterChatMessage {
     role: AdapterChatRole
     content: string
@@ -109,6 +119,7 @@ export interface AdapterChatMessage {
     // only — never persisted (history-restored turns reconstruct from fields).
     providerEcho?: unknown
     images?: AdapterImagePart[]          // role:'user' — image attachments (vision)
+    audios?: AdapterAudioPart[]          // role:'user' — audio attachments (google-gemini only)
     // Native prompt-cache boundary flag, preserved from OpenAIChat.cachePoint
     // (cache prompt card / automaticCachePoint — the same infra Anthropic
     // caching consumes). The google-gemini adapter folds the LAST flagged
