@@ -24,6 +24,7 @@ import { runImageEmbedding } from "./transformers";
 import { runLuaEditTrigger } from "./scriptings";
 import { getModelInfo, LLMFlags } from "../model/modellist";
 import { resolveChatModelBinding, resolvePresetMaxOutputTokens } from "./request/modelPresetBinding";
+import { VISION_CAPABLE_ADAPTER_KINDS } from "src/ts/preset/types";
 import { hypaMemoryV3 } from "./memory/hypav3";
 import { getModuleAssets, getModuleToggles } from "./modules";
 import { readImage } from "../globalApi.svelte";
@@ -278,6 +279,13 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     // budget (preset.maxContext, default 65000) instead of the global
     // db.maxContext — clamped to the model's context window when known.
     // Without this, a small global maxContext blocks large-context presets.
+    // Whether the chat is bound to a ModelPreset whose adapter can natively take
+    // images. The classic multimodal builder below gates image attachment on
+    // getModelInfo(db.aiModel), which is preset-blind — so a preset-bound chat
+    // (db.aiModel carries no hasImageInput flag) would fall back to local
+    // vit-gpt2 captioning instead of sending the real image to e.g. Gemini.
+    // Mirror request.ts's supportsVision gate so images ride the preset path.
+    let boundPresetImageInput = false
     {
         const mainBinding = resolveChatModelBinding(currentChat, 'model')
         if (mainBinding.kind === 'modelPreset') {
@@ -292,6 +300,11 @@ export async function sendChat(chatProcessIndex = -1,arg:{
             // first message fail with a false "too much token" error.
             const presetOut = resolvePresetMaxOutputTokens(mainBinding.preset)
             if (presetOut !== undefined) maxResponseTokens = presetOut
+
+            const snap = mainBinding.preset.profileSnapshot
+            const caps = snap.capabilities ?? []
+            boundPresetImageInput = VISION_CAPABLE_ADAPTER_KINDS.includes(snap.adapterKind)
+                && (caps.includes('vision') || mainBinding.preset.imageInput === true)
         }
     }
 
@@ -892,7 +905,7 @@ export async function sendChat(chatProcessIndex = -1,arg:{
                 const inlayName = inlay.replace('{{inlayed::', '').replace('{{inlay::', '').replace('}}', '').replace('{{inlayeddata::', '')
                 const inlayData = await getInlayAsset(inlayName)
                 if(inlayData?.type === 'image'){
-                    if(modelinfo.flags.includes(LLMFlags.hasImageInput)){
+                    if(modelinfo.flags.includes(LLMFlags.hasImageInput) || boundPresetImageInput){
                         multimodal.push({
                             type: 'image',
                             base64: inlayData.data,
