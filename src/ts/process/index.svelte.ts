@@ -1007,8 +1007,16 @@ export async function sendChat(chatProcessIndex = -1,arg:{
                         })
                     }
                     else{
-                        const captionResult = await runImageEmbedding(inlayData.data) 
-                        formatedChat += `[${captionResult[0].generated_text}]`
+                        try {
+                            const captionResult = await runImageEmbedding(inlayData.data)
+                            formatedChat += `[${captionResult[0].generated_text}]`
+                        } catch (e) {
+                            // Local image-captioning model (transformers.js / ONNX WASM) can hard-abort
+                            // in the node/PocketRisu environment (OOM, thread init, etc.) with RuntimeError:
+                            // Aborted(). Degrade gracefully: skip the caption and keep sending the chat
+                            // instead of letting the WASM crash fail the whole request.
+                            console.error('[inlay] local image captioning failed, skipping caption', e)
+                        }
                     }
                 }
                 if(inlayData?.type === 'video' || inlayData?.type === 'audio'){

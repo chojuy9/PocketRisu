@@ -357,6 +357,9 @@ function toUserParts(message: AdapterChatMessage): GeminiPart[] {
     for (const img of message.images ?? []) {
         parts.push({ inlineData: { mimeType: img.mime ?? 'image/png', data: img.base64 } })
     }
+    for (const audio of message.audios ?? []) {
+        parts.push({ inlineData: { mimeType: audio.mime ?? 'audio/mpeg', data: audio.base64 } })
+    }
     // Gemini rejects an empty parts array; keep at least one part.
     if (parts.length === 0) parts.push({ text: '' })
     return parts
