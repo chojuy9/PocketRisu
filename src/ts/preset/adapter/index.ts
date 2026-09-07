@@ -8,6 +8,7 @@ export type {
     AdapterCredential,
     AdapterError,
     AdapterErrorKind,
+    AdapterAudioPart,
     AdapterImagePart,
     AdapterPreparedRequest,
     AdapterReasoningPart,
