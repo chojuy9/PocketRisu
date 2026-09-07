@@ -805,6 +805,14 @@ async function requestModelPreset(arg:RequestDataArgumentExtended, preset:ModelP
     // off, so OFF is byte-identical to the prior text-only behavior.
     const supportsVision = presetSupportsVision(preset)
 
+    // Audio gate: Gemini accepts inline audio on every model (the classic path
+    // sends it whenever the model carries the audio-input flag, which all Gemini
+    // entries do). The preset path previously dropped audio multimodals entirely,
+    // so mp3/wav attachments never reached Vertex/AI-Studio Gemini through a
+    // ModelPreset. Carry them for the google-gemini adapter. Additive — only
+    // messages that actually contain audio multimodals change.
+    const supportsAudio = kind === 'google-gemini'
+
     // Gemini context caching: MAIN chat requests on the google-gemini adapter
     // (AI Studio key auth OR Vertex native service-account auth) — tool runs and
     // previews are excluded. Both auth kinds share the cachedContents wire; the
@@ -885,8 +893,8 @@ async function requestModelPreset(arg:RequestDataArgumentExtended, preset:ModelP
     // text-only adapter would reject). Guards regression P1#2. Image attachments
     // ride along in both branches, gated by supportsVision.
     const messages = tools
-        ? await expandAdapterMessages(arg.formated, decodeToolCall, supportsVision)
-        : arg.formated.map((m) => toAdapterMessage(m, supportsVision))
+        ? await expandAdapterMessages(arg.formated, decodeToolCall, supportsVision, supportsAudio)
+        : arg.formated.map((m) => toAdapterMessage(m, supportsVision, supportsAudio))
 
     // previewBody never calls the chat endpoint and never runs tools — it just
     // builds and returns the prepared request. (One caveat: a google-service-
