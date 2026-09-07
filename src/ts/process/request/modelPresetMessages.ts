@@ -1,4 +1,4 @@
-import type { AdapterChatMessage, AdapterImagePart } from 'src/ts/preset/adapter'
+import type { AdapterChatMessage, AdapterImagePart, AdapterAudioPart } from 'src/ts/preset/adapter'
 import type { OpenAIChat } from '../index.svelte'
 import type { toolCallData } from '../mcp/mcp'
 import type { RPCToolCallContent } from '../mcp/mcplib'
@@ -19,15 +19,16 @@ export async function expandAdapterMessages(
     formated: OpenAIChat[],
     decode: DecodeToolCall,
     includeImages = false,
+    includeAudio = false,
 ): Promise<AdapterChatMessage[]> {
     const out: AdapterChatMessage[] = []
     for (const m of formated) {
         if (m.role === 'assistant' && typeof m.content === 'string' && m.content.includes('<tool_call>')) {
-            // Tool-call assistant turns carry no image attachments; expand as-is.
+            // Tool-call assistant turns carry no image/audio attachments; expand as-is.
             out.push(...await expandToolCallMessage(m, decode))
             continue
         }
-        out.push(toAdapterMessage(m, includeImages))
+        out.push(toAdapterMessage(m, includeImages, includeAudio))
     }
     return out
 }
@@ -53,6 +54,27 @@ function extractImages(m: OpenAIChat): AdapterImagePart[] | undefined {
         }
     }
     return images.length > 0 ? images : undefined
+}
+
+// Parse the classic `data:<mime>;base64,<payload>` URL into the raw payload + mime.
+// Mirrors parseImageData but tags the part as audio.
+function parseAudioData(src: string): AdapterAudioPart {
+    const match = /^data:([^;]+);base64,(.*)$/s.exec(src)
+    if (match) return { kind: 'audio', base64: match[2], mime: match[1] }
+    return { kind: 'audio', base64: src }
+}
+
+// Collect audio attachments from a message's multimodals. Only the google-gemini
+// adapter consumes these; other adapters leave msg.audios untouched.
+function extractAudios(m: OpenAIChat): AdapterAudioPart[] | undefined {
+    if (!m.multimodals || m.multimodals.length === 0) return undefined
+    const audios: AdapterAudioPart[] = []
+    for (const mm of m.multimodals) {
+        if (mm.type === 'audio' && typeof mm.base64 === 'string' && mm.base64.length > 0) {
+            audios.push(parseAudioData(mm.base64))
+        }
+    }
+    return audios.length > 0 ? audios : undefined
 }
 
 // Split an assistant message that embeds `<tool_call>` markers into the
@@ -109,18 +131,24 @@ export function toolResponseText(response: RPCToolCallContent[]): string {
     return texts.join('\n')
 }
 
-export function toAdapterMessage(m: OpenAIChat, includeImages = false): AdapterChatMessage {
+export function toAdapterMessage(m: OpenAIChat, includeImages = false, includeAudio = false): AdapterChatMessage {
     const role: AdapterChatMessage['role'] = m.role === 'function' ? 'tool' : m.role
     const msg: AdapterChatMessage = { role, content: m.content ?? '' }
     if (m.name) msg.name = m.name
     // Preserve the native prompt-cache boundary flag (cache card /
     // automaticCachePoint) so the google-gemini adapter can consume it.
     if (m.cachePoint) msg.cachePoint = true
-    // Vision: classic only attaches images to user turns (openAI/requests.ts),
-    // so mirror that — assistant/system image parts are dropped.
-    if (includeImages && role === 'user') {
-        const images = extractImages(m)
-        if (images) msg.images = images
+    // Vision/audio: classic only attaches media to user turns (openAI/requests.ts),
+    // so mirror that — assistant/system media parts are dropped.
+    if (role === 'user') {
+        if (includeImages) {
+            const images = extractImages(m)
+            if (images) msg.images = images
+        }
+        if (includeAudio) {
+            const audios = extractAudios(m)
+            if (audios) msg.audios = audios
+        }
     }
     return msg
 }
