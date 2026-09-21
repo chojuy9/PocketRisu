@@ -279,10 +279,11 @@ export class NodeStorage{
     // Reverse proxies / tunnels cap a single request body — Cloudflare's
     // free/pro/business plans at 100 MB. Values larger than the threshold are
     // uploaded as ordered sub-limit chunks the server reassembles, so a big
-    // database.bin or asset survives the hop. 90 MB leaves headroom under the
-    // 100 MB ceiling for headers and any 1000-vs-1024 unit ambiguity.
-    private static readonly WRITE_CHUNK_THRESHOLD = 90 * 1024 * 1024
-    private static readonly WRITE_CHUNK_SIZE = 90 * 1024 * 1024
+    // database.bin or asset survives the hop. 80 MB leaves a wide margin under
+    // the 100 MB ceiling for headers, TLS/record framing and any 1000-vs-1024
+    // unit ambiguity, since a chunk that grazes the cap fails at the edge.
+    private static readonly WRITE_CHUNK_THRESHOLD = 80 * 1024 * 1024
+    private static readonly WRITE_CHUNK_SIZE = 80 * 1024 * 1024
 
     // Cross-device single-writer lock identity. Persisted in sessionStorage so
     // a reload or an OS tab restore of the SAME tab keeps the same identity —

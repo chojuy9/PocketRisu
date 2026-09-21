@@ -818,6 +818,20 @@ export async function saveDb() {
         });
         window.addEventListener('pagehide', flushImmediate);
 
+        // A full DB (120 MB+) can't be uploaded inside the pagehide window, and
+        // triggerSave's upload fetch isn't keepalive, so a tab closed mid-save
+        // never reaches the server — another device then reloads a stale DB and
+        // the session that just happened appears to vanish. If anything is still
+        // queued (debounce pending / changed) or uploading (saving.state), ask
+        // the browser to warn before the tab is discarded so the user can wait
+        // for the save to land. No-op once everything is flushed.
+        window.addEventListener('beforeunload', (e) => {
+            if (saving.state || changed || saveTimeout !== null) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+
         $effect(() => {
             for (const key in DBState.db) {
                 if (
@@ -1309,6 +1323,16 @@ export async function saveDb() {
             // resyncs the patcher baseline. The console.error is the primary
             // breadcrumb for tracking down the unknown root cause.
             const dangerous = findDangerousChatOps(patchData.patch)
+            // /api/patch sends one JSON body and can't be chunked. If that body
+            // would exceed the reverse-proxy/tunnel request cap (Cloudflare =
+            // 100 MB) it is killed at the edge with a 413 mid-session, leaving
+            // the server stuck on a stale revision — which is how switching
+            // devices can lose a whole session. Measure the real UTF-8 body and,
+            // when it's too large, skip straight to the chunked full write
+            // below (setItemChunked) instead of eating the wasted round-trip.
+            // 80 MB matches the write-chunk margin under the 100 MB cap.
+            const patchBytes = new Blob([JSON.stringify(patchData)]).size
+            const patchTooLarge = patchBytes > 80 * 1024 * 1024
             if (dangerous.length > 0) {
                 // Always log a one-line summary so production environments
                 // see enough to file a bug report. The rich dump below is
@@ -1462,6 +1486,15 @@ export async function saveDb() {
                 console.error('[Save:guard-debug] chats[] distribution per affected character:', charsDistribution)
                 }
                 // Leave saved=false so the full-write path below kicks in.
+            } else if (patchTooLarge) {
+                console.warn(
+                    `[Save] Patch body ~${(patchBytes / (1024 * 1024)).toFixed(1)}MB exceeds the `
+                    + `proxy/tunnel cap; skipping /api/patch and going straight to the chunked full write`,
+                )
+                // /api/patch can't be chunked, so a body over the edge cap would
+                // 413 here and only then fall through. Skip that: saved stays
+                // false and the full-write fallback below persists via
+                // setItemChunked (≤80 MB parts the server reassembles).
             } else {
                 // The revision this client last synced against, read before
                 // the patch: a 409 returns the server's current etag, which
