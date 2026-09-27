@@ -662,10 +662,10 @@ export class NodeStorage{
             })
             if(da.status === 409){
                 const data = await da.json()
-                throw new ConflictError(data.error, data.currentEtag)
+                throw new ConflictError(data.error, data.currentEtag, typeof data.code === 'string' ? data.code : undefined)
             }
             if(da.status < 200 || da.status >= 300){
-                throw "setItem Error"
+                throw await this.storageRequestError('setItem', da)
             }
             finalRes = da
         }
@@ -676,6 +676,9 @@ export class NodeStorage{
         const nextEtag = data.etag as string | undefined
         if (key === 'database/database.bin' && nextEtag) {
             this._lastDbEtag = nextEtag
+        }
+        if (key === 'database/database.bin') {
+            this._lastDbWriteDiagnostics = parseHashDiagnostics(data)
         }
     }
     async getItem(key:string):Promise<Buffer> {
