@@ -24,7 +24,7 @@ export interface SaveTiming {
     fullEncodeMs: number
     fullWriteMs: number
     /** Why this save went to a full write instead of a patch. */
-    fullWriteReason?: 'forced' | 'no-patch-sync' | 'chat-guard' | 'rejected'
+    fullWriteReason?: 'forced' | 'no-patch-sync' | 'chat-guard' | 'rejected' | 'patch-too-large'
     server?: PatchServerTimings
 }
 

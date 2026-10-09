@@ -1472,6 +1472,7 @@ export async function saveDb() {
                 // 413 here and only then fall through. Skip that: saved stays
                 // false and the full-write fallback below persists via
                 // setItemChunked (≤80 MB parts the server reassembles).
+                timing.fullWriteReason = 'patch-too-large'
             } else {
                 // The revision this client last synced against, read before
                 // the patch: a 409 returns the server's current etag, which
