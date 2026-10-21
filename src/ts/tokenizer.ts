@@ -8,7 +8,6 @@ import { tokenizeGGUFModel } from "./process/models/local";
 import { globalFetch } from "./globalApi.svelte";
 import { getModelInfo, LLMTokenizer, type LLMModel } from "./model/modellist";
 import { pluginV2 } from "./plugins/plugins.svelte";
-import type { GemmaTokenizer } from "@huggingface/transformers";
 import { LRUMap } from 'mnemonist';
 import { makeHashedStorageKey, readPersistentJson, writePersistentJson } from "./storage/persistentKv";
 
@@ -231,22 +230,14 @@ async function tokenizeGoogleCloud(text:string, modelId?:string) {
     return new Uint32Array(count)
 }
 
-// Shared in-flight load, same rule as the maps above: concurrent counts
-// (several TokenCount mounts at once) used to fetch and parse the 9MB vocab
-// once each. A failed load is dropped so a later call can retry.
-let gemmaTokenizer:Promise<GemmaTokenizer> | null = null
+// Gemma and Gemini (when the Google countTokens API is off) count with the
+// Gemma 3 SentencePiece vocabulary through the shared web-tokenizers loader.
+// This used to feed /token/llama/llama3.json to a GemmaTokenizer, i.e. Llama 3
+// merge rules; the Gemma 1/2 vocabulary would not be right either — it
+// over-counts Korean by ~14% against Vertex countTokens, while Gemma 3 (the
+// vocabulary Google's SDK uses for local counting) matches it.
 async function gemmaTokenize(text:string) {
-    if(!gemmaTokenizer){
-        const pending = (async () => {
-            const {GemmaTokenizer} = await import('@huggingface/transformers')
-            return new GemmaTokenizer(
-                await (await fetch("/token/llama/llama3.json")
-            ).json(), {})
-        })()
-        gemmaTokenizer = pending
-        pending.catch(() => { if (gemmaTokenizer === pending) gemmaTokenizer = null })
-    }
-    return (await gemmaTokenizer).encode(text)
+    return await tokenizeWebTokenizers(text, 'gemma')
 }
 
 async function loadTikParser(model:string):Promise<Tiktoken> {
@@ -335,7 +326,7 @@ async function loadWebTokenizer(type:tokenizerType):Promise<Tokenizer> {
             ).arrayBuffer())
         case 'gemma':
             return await webTokenizer.Tokenizer.fromSentencePiece(
-                await (await fetch("/token/gemma/tokenizer.model")
+                await (await fetch("/token/gemma3/tokenizer.model")
             ).arrayBuffer())
         case 'DeepSeek':
             return await webTokenizer.Tokenizer.fromJSON(
